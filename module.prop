@@ -1,7 +1,7 @@
 id=cms_2026_magisk
 name=CMS-2026 Tool
 version=v1.0.0
-versionCode=1
+versionCode=100
 author=clcwpwqi
 description=基于Web Crypto API的本地高强度加解密工具。
 updateJson=https://raw.githubusercontent.com/clcwpwqi/CMS-2026-Magisk/update/update.json
