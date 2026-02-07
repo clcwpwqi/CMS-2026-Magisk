@@ -1,1 +1,6 @@
-v1.0.0 released!
+{
+    "version": "v1.0.0",
+    "versionCode": 100,
+    "zipUrl": "https://github.com/clcwpwqi/CMS-2026-Magisk/releases/download/v1.0.0/CMS-2026-Magisk-v1.0.0.zip",
+    "changelog": "https://raw.githubusercontent.com/clcwpwqi/CMS-2026-Magisk/main/CHANGELOG.md"
+}
