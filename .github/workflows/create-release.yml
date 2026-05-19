@@ -1,0 +1,84 @@
+name: Create Release and Upload Module
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., v2.0.0)'
+        required: true
+        default: 'v2.0.0'
+      tag:
+        description: 'Git tag'
+        required: true
+        default: 'v2.0.0'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Prepare directory
+        run: |
+          mkdir -p build
+          
+      - name: Create Module ZIP
+        run: |
+          zip -r build/CMS-2026-Magisk-${{ github.event.inputs.version }}.zip \
+            module.prop \
+            customize.sh \
+            service.sh \
+            bin/ \
+            webroot/ \
+            META-INF/ \
+            update/
+            
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          release_name: CMS-2026 Magisk Module ${{ github.event.inputs.version }}
+          draft: false
+          prerelease: false
+          body: |
+            ## CMS-2026 Magisk Module v${{ github.event.inputs.version }}
+            
+            ### 新功能
+            - ✨ **CLI命令行支持**: 现在可以通过终端使用 `cms2026` 命令进行加解密操作
+            - 📁 **独立目录**: CLI工具安装到 `/data/local/cms2026/`
+            - 🔗 **符号链接**: 自动创建 `/data/local/bin/cms2026` 方便调用
+            - 📄 **文件支持**: 支持从文件读取输入和输出到文件
+            
+            ### 使用方法
+            
+            ```bash
+            # 加密字符串
+            cms2026 -e "待加密内容" -p "我的密码"
+            
+            # 解密字符串
+            cms2026 -d "密文内容" -p "我的密码"
+            
+            # 强加密模式
+            cms2026 -e "内容" -p "密码" --strong
+            ```
+            
+            详细使用说明请查看 [README.md](https://github.com/clcwpwqi/CMS-2026-Magisk/blob/${{ github.event.inputs.tag }}/README.md)
+            
+            ### 安装
+            1. 下载下方 `.zip` 文件
+            2. 在 Magisk/KernelSU/APatch 管理器中刷入
+            3. 重启设备
+            
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./build/CMS-2026-Magisk-${{ github.event.inputs.version }}.zip
+          asset_name: CMS-2026-Magisk-${{ github.event.inputs.version }}.zip
+          asset_content_type: application/zip
