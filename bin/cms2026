@@ -43,7 +43,7 @@ EOF
 
 show_version() {
     echo "CMS-2026 CLI Tool v2.0.0"
-    echo "Author: clcwpqi"
+    echo "Author: clcwpwqi"
 }
 
 initialize_env() {
