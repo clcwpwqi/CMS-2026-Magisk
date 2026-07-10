@@ -2,14 +2,24 @@
 # CMS-2026 CLI Tool
 # Version: 2.0.0
 # Author: clcwpwqi
+# Description: CLI frontend for CMS-2026 encryption algorithm
+#   Algorithm: PBKDF2 (SHA-256, 100,000 iterations) + AES-256-GCM
+#   Output format: CMS2026:2.0:<B|S>:<salt_hex(32c)>:<iv_hex(24c)>:<cipher_b64>
+#
+# Cryptographic operations are delegated to Node.js or Python 3.
 
-MODDIR=${0%/*}
-CMS2026_DIR="/data/local/cms2026"
-BIN_PATH="$CMS2026_DIR/cms2026_bin"
+set -e
+
+CMS2026_VERSION="2.0.0"
+CMS2026_FORMAT_PREFIX="CMS2026"
+
+# ---------------------------------------------------------------------------
+# Help & Version
+# ---------------------------------------------------------------------------
 
 show_help() {
     cat << EOF
-CMS-2026 Secure Encryption Tool v2.0.0
+CMS-2026 Secure Encryption Tool v${CMS2026_VERSION}
 
 Usage: cms2026 [OPTIONS]
 
@@ -17,156 +27,213 @@ OPTIONS:
     -e, --encrypt <text>     Encrypt the given text
     -d, --decrypt <text>     Decrypt the given ciphertext
     -p, --password <pwd>     Set encryption/decryption password
-    --strong                 Use strong encryption mode (256-bit key)
+    --strong                 Mark output as strong encryption mode
     -o, --output <file>      Write output to file instead of stdout
     -i, --input <file>       Read input from file instead of argument
     -h, --help               Show this help message
     -v, --version            Show version information
 
 EXAMPLES:
-    # Encrypt a string
     cms2026 -e "Hello World" -p "mypassword"
-
-    # Decrypt a ciphertext
-    cms2026 -d "U2FsdGVkX1..." -p "mypassword"
-
-    # Strong encryption mode
+    cms2026 -d "CMS2026:2.0:B:ab...:ab...:..." -p "mypassword"
     cms2026 -e "Secret data" -p "strongpass" --strong
-
-    # Read from file
     cms2026 -e -i input.txt -p "pass" -o output.enc
-
-Note: For WebUI, please use the CMS-2026 Web Interface.
 
 EOF
 }
 
 show_version() {
-    echo "CMS-2026 CLI Tool v2.0.0"
+    echo "CMS-2026 CLI Tool v${CMS2026_VERSION}"
     echo "Author: clcwpwqi"
+    echo "Algorithm: PBKDF2(SHA-256, 100k iter) + AES-256-GCM"
 }
 
-initialize_env() {
-    if [ ! -d "$CMS2026_DIR" ]; then
-        mkdir -p "$CMS2026_DIR"
-        chmod 755 "$CMS2026_DIR"
-    fi
-    
-    if [ ! -L "$BIN_PATH" ] && [ -f "$MODDIR/bin/cms2026" ]; then
-        cp -f "$MODDIR/bin/cms2026" "$BIN_PATH"
-        chmod 755 "$BIN_PATH"
+# ---------------------------------------------------------------------------
+# Crypto Backend Detection
+# ---------------------------------------------------------------------------
+
+detect_crypto_backend() {
+    # Prefer bundled Node.js (if the module ships one)
+    if [ -x "/data/local/cms2026/node/bin/node" ]; then
+        echo "node"
+    elif [ -x "/data/local/cms2026/node" ]; then
+        echo "node"
+    elif command -v node >/dev/null 2>&1; then
+        echo "node"
+    # Fall back to Python with cryptography
+    elif [ -x "/data/local/cms2026/python/bin/python3" ]; then
+        echo "python"
+    elif command -v python3 >/dev/null 2>&1; then
+        echo "python"
+    else
+        echo ""
     fi
 }
 
-derive_key() {
-    local password="$1"
-    local salt="$2"
-    local key_len="$3"
-    
-    if [ -n "$salt" ]; then
-        echo -n "$password$salt" | sha256sum | cut -d' ' -f1
-    else
-        echo -n "$password" | sha256sum | cut -d' ' -f1
-    fi
+# ---------------------------------------------------------------------------
+# Node.js Crypto Helper
+# ---------------------------------------------------------------------------
+
+crypto_nodejs() {
+    local action="$1"
+    local text="$2"
+    local password="$3"
+    local strong="$4"
+
+    node -e "
+const crypto = require('crypto');
+
+const action = process.argv[1];
+const text = process.argv[2];
+const password = process.argv[3];
+const strong = process.argv[4] === 'true';
+
+function encrypt(plaintext, password) {
+    const salt = crypto.randomBytes(16);
+    const iv = crypto.randomBytes(12);
+    const key = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256');
+
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    let encrypted = cipher.update(plaintext, 'utf8');
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    const tag = cipher.getAuthTag();
+
+    // ciphertext + GCM tag (16 bytes)
+    const cipherWithTag = Buffer.concat([encrypted, tag]);
+    const cipherB64 = cipherWithTag.toString('base64');
+
+    const mode = strong ? 'S' : 'B';
+    const saltHex = salt.toString('hex');
+    const ivHex = iv.toString('hex');
+    return 'CMS2026:2.0:' + mode + ':' + saltHex + ':' + ivHex + ':' + cipherB64;
 }
 
-cms2026_encrypt() {
-    local plaintext="$1"
-    local password="$2"
-    local strong="$3"
-    
-    if [ -z "$plaintext" ] || [ -z "$password" ]; then
-        echo "Error: Plaintext and password are required" >&2
-        return 1
-    fi
-    
-    local salt="$(date +%s%N | sha256sum | cut -c1-16)"
-    local iv="$(date +%s%N | sha256sum | cut -c1-16)"
-    
-    local key
-    if [ "$strong" = "true" ]; then
-        key="$(echo -n "${password}${salt}" | sha256sum | cut -d' ' -f1)"
-        key="$(echo -n "${key}${iv}" | sha256sum | cut -d' ' -f1)"
-    else
-        key="$(derive_key "$password" "$salt" "128")"
-    fi
-    
-    local encoded_text="$(echo -n "$plaintext" | base64)"
-    
-    local cipher
-    if command -v openssl >/dev/null 2>&1; then
-        cipher="$(echo -n "$encoded_text" | openssl enc -aes-256-cbc -K "$key" -iv "$iv" -A -a 2>/dev/null)"
-        if [ $? -ne 0 ] || [ -z "$cipher" ]; then
-            cipher="$(echo -n "$encoded_text" | tr -d '\n' | xxd -p | tr -d '\n' | fold -w2 | while read c; do printf "\x$(printf "%x" $((0x$c ^ 0x${key:0:2})) )"; done | head -c ${#encoded_text} | base64)"
-        fi
-    else
-        cipher="$(echo -n "$encoded_text" | tr -d '\n' | xxd -p | tr -d '\n' | fold -w2 | while read c; do printf "\x$(printf "%x" $((0x$c ^ 0x${key:0:2})) )"; done | head -c ${#encoded_text} | base64)"
-    fi
-    
-    local result="CMS2026:2.0:$(echo -n "$strong" | sed 's/true/S/s; s/false/B/s'):$salt:$iv:$cipher"
-    echo "$result"
+function decrypt(ciphertext, password) {
+    // Parse: CMS2026:2.0:<mode>:<salt_hex>:<iv_hex>:<cipher_b64>
+    const parts = ciphertext.split(':');
+    if (parts.length < 6 || parts[0] !== 'CMS2026' || parts[1] !== '2.0') {
+        throw new Error('Invalid ciphertext format');
+    }
+    const salt = Buffer.from(parts[3], 'hex');
+    const iv = Buffer.from(parts[4], 'hex');
+    const cipherB64 = parts.slice(5).join(':');
+    const cipherWithTag = Buffer.from(cipherB64, 'base64');
+
+    // Split: encrypted data + 16-byte GCM tag
+    const encData = cipherWithTag.subarray(0, cipherWithTag.length - 16);
+    const authTag = cipherWithTag.subarray(cipherWithTag.length - 16);
+
+    const key = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256');
+
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(encData);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString('utf8');
 }
 
-cms2026_decrypt() {
-    local ciphertext="$1"
-    local password="$2"
-    
-    if [ -z "$ciphertext" ] || [ -z "$password" ]; then
-        echo "Error: Ciphertext and password are required" >&2
-        return 1
-    fi
-    
-    if ! echo "$ciphertext" | grep -q "^CMS2026:"; then
-        echo "Error: Invalid ciphertext format" >&2
-        return 1
-    fi
-    
-    local version="$(echo "$ciphertext" | cut -d: -f2)"
-    local mode="$(echo "$ciphertext" | cut -d: -f3)"
-    local salt="$(echo "$ciphertext" | cut -d: -f4)"
-    local iv="$(echo "$ciphertext" | cut -d: -f5)"
-    local cipher="$(echo "$ciphertext" | cut -d: -f6)"
-    
-    local strong="false"
-    [ "$mode" = "S" ] && strong="true"
-    
-    local key
-    if [ "$strong" = "true" ]; then
-        key="$(echo -n "${password}${salt}" | sha256sum | cut -d' ' -f1)"
-        key="$(echo -n "${key}${iv}" | sha256sum | cut -d' ' -f1)"
-    else
-        key="$(derive_key "$password" "$salt" "128")"
-    fi
-    
-    local decoded
-    if command -v openssl >/dev/null 2>&1; then
-        decoded="$(echo -n "$cipher" | openssl enc -aes-256-cbc -K "$key" -iv "$iv" -d -A -a 2>/dev/null)"
-        if [ $? -ne 0 ] || [ -z "$decoded" ]; then
-            decoded="$(echo -n "$cipher" | base64 -d 2>/dev/null | xxd -p | tr -d '\n' | fold -w2 | while read c; do printf "\x$(printf "%x" $((0x$c ^ 0x${key:0:2})) )"; done)"
-        fi
-    else
-        decoded="$(echo -n "$cipher" | base64 -d 2>/dev/null | xxd -p | tr -d '\n' | fold -w2 | while read c; do printf "\x$(printf "%x" $((0x$c ^ 0x${key:0:2})) )"; done)"
-    fi
-    
-    echo "$decoded" | base64 -d 2>/dev/null
+try {
+    let result;
+    if (action === 'encrypt') {
+        result = encrypt(text, password);
+    } else {
+        result = decrypt(text, password);
+    }
+    process.stdout.write(result);
+} catch (e) {
+    process.stderr.write('Error: ' + e.message);
+    process.exit(1);
 }
+" -- "$action" "$text" "$password" "$strong"
+}
+
+# ---------------------------------------------------------------------------
+# Python Crypto Helper
+# ---------------------------------------------------------------------------
+
+crypto_python() {
+    local action="$1"
+    local text="$2"
+    local password="$3"
+    local strong="$4"
+
+    python3 -c "
+import sys, os, hashlib, base64
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+def encrypt(plaintext, password):
+    salt = os.urandom(16)
+    iv = os.urandom(12)
+    key = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000, dklen=32)
+
+    aesgcm = AESGCM(key)
+    cipher_with_tag = aesgcm.encrypt(iv, plaintext.encode(), None)
+
+    mode = 'S' if sys.argv[4] == 'true' else 'B'
+    salt_hex = salt.hex()
+    iv_hex = iv.hex()
+    cipher_b64 = base64.b64encode(cipher_with_tag).decode()
+    return 'CMS2026:2.0:' + mode + ':' + salt_hex + ':' + iv_hex + ':' + cipher_b64
+
+def decrypt(ciphertext, password):
+    parts = ciphertext.split(':')
+    if len(parts) < 6 or parts[0] != 'CMS2026' or parts[1] != '2.0':
+        raise ValueError('Invalid ciphertext format')
+
+    salt = bytes.fromhex(parts[3])
+    iv = bytes.fromhex(parts[4])
+    cipher_b64 = ':'.join(parts[5:])
+    cipher_with_tag = base64.b64decode(cipher_b64)
+
+    key = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000, dklen=32)
+
+    aesgcm = AESGCM(key)
+    plaintext = aesgcm.decrypt(iv, cipher_with_tag, None)
+    return plaintext.decode('utf-8')
+
+try:
+    action = sys.argv[1]
+    text = sys.argv[2]
+    password = sys.argv[3]
+    if action == 'encrypt':
+        result = encrypt(text, password)
+    else:
+        result = decrypt(text, password)
+    sys.stdout.write(result)
+except Exception as e:
+    sys.stderr.write('Error: ' + str(e))
+    sys.exit(1)
+" "$action" "$text" "$password" "$strong"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 main() {
-    initialize_env
-    
+    local backend
+    backend=$(detect_crypto_backend)
+
+    if [ -z "$backend" ]; then
+        echo "Error: No crypto backend found." >&2
+        echo "CMS-2026 CLI requires one of: Node.js, Python 3 (with cryptography)" >&2
+        echo "Please ensure a supported runtime is available in PATH." >&2
+        exit 1
+    fi
+
     local mode=""
     local text=""
     local password=""
     local strong="false"
     local output_file=""
     local input_file=""
-    
+
     while [ $# -gt 0 ]; do
         case "$1" in
             -e|--encrypt)
                 mode="encrypt"
                 shift
-                if [ -n "$1" ] && [ "${1:0:1}" != "-" ]; then
+                if [ -n "$1" ] && [ "${1#-}" = "$1" ]; then
                     text="$1"
                     shift
                 fi
@@ -174,29 +241,38 @@ main() {
             -d|--decrypt)
                 mode="decrypt"
                 shift
-                if [ -n "$1" ] && [ "${1:0:1}" != "-" ]; then
+                if [ -n "$1" ] && [ "${1#-}" = "$1" ]; then
                     text="$1"
                     shift
                 fi
                 ;;
             -p|--password)
-                shift
-                password="$1"
-                shift
+                if [ -z "$2" ]; then
+                    echo "Error: -p requires a password value" >&2
+                    exit 1
+                fi
+                password="$2"
+                shift 2
                 ;;
             --strong)
                 strong="true"
                 shift
                 ;;
             -o|--output)
-                shift
-                output_file="$1"
-                shift
+                if [ -z "$2" ]; then
+                    echo "Error: -o requires a file path" >&2
+                    exit 1
+                fi
+                output_file="$2"
+                shift 2
                 ;;
             -i|--input)
-                shift
-                input_file="$1"
-                shift
+                if [ -z "$2" ]; then
+                    echo "Error: -i requires a file path" >&2
+                    exit 1
+                fi
+                input_file="$2"
+                shift 2
                 ;;
             -h|--help)
                 show_help
@@ -207,55 +283,55 @@ main() {
                 exit 0
                 ;;
             *)
-                if [ -z "$mode" ]; then
-                    text="$1"
-                fi
-                shift
+                echo "Error: Unknown option '$1'" >&2
+                show_help
+                exit 1
                 ;;
         esac
     done
-    
-    if [ -n "$input_file" ] && [ -f "$input_file" ]; then
-        text="$(cat "$input_file")"
-    fi
-    
+
     if [ -z "$mode" ]; then
         echo "Error: Please specify -e (encrypt) or -d (decrypt)" >&2
         show_help
         exit 1
     fi
-    
+
+    if [ -n "$input_file" ]; then
+        if [ ! -f "$input_file" ]; then
+            echo "Error: Input file '$input_file' not found" >&2
+            exit 1
+        fi
+        text=$(cat "$input_file")
+    fi
+
     if [ -z "$text" ]; then
-        echo "Error: No text provided" >&2
+        echo "Error: No input text provided. Use inline text after -e/-d or -i <file>" >&2
         show_help
         exit 1
     fi
-    
+
     if [ -z "$password" ]; then
         echo "Error: Password is required (-p)" >&2
         exit 1
     fi
-    
+
     local result=""
-    case "$mode" in
-        encrypt)
-            result="$(cms2026_encrypt "$text" "$password" "$strong")"
-            ;;
-        decrypt)
-            result="$(cms2026_decrypt "$text" "$password")"
-            ;;
-    esac
-    
-    if [ $? -eq 0 ] && [ -n "$result" ]; then
-        if [ -n "$output_file" ]; then
-            echo "$result" > "$output_file"
-            echo "Output written to: $output_file"
-        else
-            echo "$result"
-        fi
-    else
+    if [ "$backend" = "node" ]; then
+        result=$(crypto_nodejs "$mode" "$text" "$password" "$strong")
+    elif [ "$backend" = "python" ]; then
+        result=$(crypto_python "$mode" "$text" "$password" "$strong")
+    fi
+
+    if [ $? -ne 0 ] || [ -z "$result" ]; then
         echo "Error: Operation failed" >&2
         exit 1
+    fi
+
+    if [ -n "$output_file" ]; then
+        printf "%s" "$result" > "$output_file"
+        echo "Output written to: $output_file"
+    else
+        printf "%s\n" "$result"
     fi
 }
 
